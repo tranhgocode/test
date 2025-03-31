@@ -27,7 +27,7 @@ int main(void)
     LCD_init();
     LCD_string("hhhhh");
 	
-	LCD_string_xy(2,5,"bye");
+    LCD_string_xy(2,5,"bye");
     
     while (1) 
     {
@@ -36,27 +36,27 @@ int main(void)
 
 void LCD_init(void)
 {
-    LCD_dir = 0xFF; // ??t PortC l‡ output
+    LCD_dir = 0xFF; // ??t PortC l√† output
     _delay_ms(40); // ??i 40ms ?? LCD kh?i t?o
     
-    LCD_command(0x28); // Ch? ?? 4-bit, 2 dÚng
+    LCD_command(0x28); // Ch? ?? 4-bit, 2 d√≤ng
     LCD_command(0x02); // ??a con tr? v? ??u
-    LCD_command(0x0C); // B?t hi?n th?, t?t con tr? nh?p nh·y
-    LCD_command(0x01); // XÛa m‡n hÏnh
-    _delay_ms(2); // ??i 2ms sau l?nh xÛa
+    LCD_command(0x0C); // B?t hi?n th?, t?t con tr? nh?p nh√°y
+    LCD_command(0x01); // X√≥a m√†n h√¨nh
+    _delay_ms(2); // ??i 2ms sau l?nh x√≥a
 }
 
 void LCD_command(unsigned char cmnd)
 {
     LCD_port = (LCD_port & 0x0F) | (cmnd & 0xF0); // G?i 4 bit cao
     LCD_port &= ~(1 << RS); // RS = 0, ghi l?nh
-    LCD_port |= (1 << EN);  // EN = 1, kÌch ho?t
+    LCD_port |= (1 << EN);  // EN = 1, k√≠ch ho?t
     _delay_ms(1);
     LCD_port &= ~(1 << EN); // EN = 0
     _delay_ms(3);
     
     LCD_port = (LCD_port & 0x0F) | ((cmnd << 4) & 0xF0); // G?i 4 bit th?p
-    LCD_port |= (1 << EN);  // EN = 1, kÌch ho?t
+    LCD_port |= (1 << EN);  // EN = 1, k√≠ch ho?t
     _delay_ms(1);
     LCD_port &= ~(1 << EN); // EN = 0
     _delay_ms(3);
