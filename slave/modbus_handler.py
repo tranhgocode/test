@@ -1,5 +1,3 @@
-# ===== FILE ĐÃ SỬA: slave/modbus_handler.py =====
-# Refactored HOÀN TOÀN - Sử dụng pymodbus thay vì tự implement
 """
 Modbus Handler - Sử dụng pymodbus cho RS-485 Serial RTU + Modbus TCP
 """
@@ -368,3 +366,4 @@ class DataParser:
         hi = (val >> 16) & 0xFFFF
         lo = val & 0xFFFF
         return [hi, lo]
+
