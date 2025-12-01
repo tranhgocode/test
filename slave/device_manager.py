@@ -1,12 +1,11 @@
 """
-Device Manager - Quản lý Sensor và Drive devices với đầy đủ điều khiển
+Device Manager - Quản lý Sensor và Drive devices với pymodbus
 """
 from datetime import datetime
-from .modbus_handler import (
-    RS485Manager, ModbusFrame, ModbusTCPManager, ModbusTCPFrame, DataParser
-)
+from .modbus_handler import RS485Manager, ModbusTCPManager, DataParser
 from .logger_handler import logger
-from .config import DEVICE_SENSOR, DEVICE_DRIVE, CONNECTION_MODE
+from .config import DEVICE_SENSOR, DEVICE_DRIVE
+
 
 class ModbusDevice:
     """Base class cho Modbus devices"""
@@ -15,14 +14,13 @@ class ModbusDevice:
         self.name = name
         self.slave_id = slave_id
         self.manager = manager
-        self.is_tcp = isinstance(manager, ModbusTCPManager)
         
         # Status tracking
         self.is_connected = False
         self.last_read_time = None
         self.ok_count = 0
         self.timeout_count = 0
-        self.crc_error_count = 0
+        self.error_count = 0
         self.last_error = ""
         self.last_data = {}
     
@@ -52,11 +50,12 @@ class ModbusDevice:
             "connected": self.is_connected,
             "ok_count": self.ok_count,
             "timeout_count": self.timeout_count,
-            "crc_error_count": self.crc_error_count,
+            "error_count": self.error_count,
             "last_error": self.last_error,
             "last_read": self.last_read_time.strftime("%H:%M:%S") if self.last_read_time else "Never",
             "data": self.last_data
         }
+
 
 class SensorDevice(ModbusDevice):
     """SHT20 Temperature & Humidity Sensor"""
@@ -70,32 +69,24 @@ class SensorDevice(ModbusDevice):
     
     def read(self) -> bool:
         """Đọc Temp + Humi từ SHT20"""
-        if self.is_tcp:
-            frame = ModbusTCPFrame.build_fc04(
-                self.slave_id,
-                DEVICE_SENSOR["start_register"],
-                DEVICE_SENSOR["count"]
-            )
-        else:
-            frame = ModbusFrame.build_fc04(
-                self.slave_id,
-                DEVICE_SENSOR["start_register"],
-                DEVICE_SENSOR["count"]
-            )
+        result = self.manager.read_input_registers(
+            self.slave_id,
+            DEVICE_SENSOR["start_register"],
+            DEVICE_SENSOR["count"]
+        )
         
-        response = self.manager.transact(frame)
-        
-        if not response:
+        if "error" in result:
             self.timeout_count += 1
-            self.last_error = self.manager.last_error or "No response"
+            self.last_error = result["error"]
             self.is_connected = False
-            logger.warning(f"{self.name} read timeout", "SENSOR")
+            logger.warning(f"{self.name} read failed: {self.last_error}", "SENSOR")
             return False
         
         # Parse response
-        parsed = DataParser.parse_sht20_response(response, self.is_tcp)
+        parsed = DataParser.parse_sht20_response(result["registers"])
         
         if "error" in parsed:
+            self.error_count += 1
             self.last_error = parsed["error"]
             logger.warning(f"{self.name} parse error: {parsed['error']}", "SENSOR")
             return False
@@ -117,6 +108,7 @@ class SensorDevice(ModbusDevice):
         )
         return True
 
+
 class DriveDevice(ModbusDevice):
     """EZi-STEP Stepper Driver"""
     
@@ -129,39 +121,22 @@ class DriveDevice(ModbusDevice):
     
     def read_status(self) -> bool:
         """Đọc status từ driver"""
-        if self.is_tcp:
-            frame = ModbusTCPFrame.build_fc03(
-                self.slave_id,
-                DEVICE_DRIVE["status_register"],
-                1
-            )
-        else:
-            frame = ModbusFrame.build_fc03(
-                self.slave_id,
-                DEVICE_DRIVE["status_register"],
-                1
-            )
+        result = self.manager.read_holding_registers(
+            self.slave_id,
+            DEVICE_DRIVE["status_register"],
+            1
+        )
         
-        response = self.manager.transact(frame)
-        
-        if not response:
+        if "error" in result:
             self.timeout_count += 1
-            self.last_error = self.manager.last_error or "No response"
+            self.last_error = result["error"]
             self.is_connected = False
-            logger.warning(f"{self.name} status read timeout", "DRIVE")
-            return False
-        
-        # Parse response
-        parsed = DataParser.parse_fc03_fc04(response, self.is_tcp)
-        
-        if "error" in parsed:
-            self.last_error = parsed["error"]
-            logger.warning(f"{self.name} parse error: {parsed['error']}", "DRIVE")
+            logger.warning(f"{self.name} status read failed", "DRIVE")
             return False
         
         # Decode status word
-        if len(parsed.get("registers", [])) > 0:
-            status_word = parsed["registers"][0]
+        if len(result.get("registers", [])) > 0:
+            status_word = result["registers"][0]
             alarm = bool(status_word & 0x8000)
             inpos = bool(status_word & 0x0010)
             running = bool(status_word & 0x0004)
@@ -187,41 +162,24 @@ class DriveDevice(ModbusDevice):
     
     def read_position(self) -> bool:
         """Đọc vị trí hiện tại"""
-        if self.is_tcp:
-            frame = ModbusTCPFrame.build_fc03(
-                self.slave_id,
-                DEVICE_DRIVE["position_register"],
-                2
-            )
-        else:
-            frame = ModbusFrame.build_fc03(
-                self.slave_id,
-                DEVICE_DRIVE["position_register"],
-                2
-            )
+        result = self.manager.read_holding_registers(
+            self.slave_id,
+            DEVICE_DRIVE["position_register"],
+            2
+        )
         
-        response = self.manager.transact(frame)
-        
-        if not response:
-            self.last_error = self.manager.last_error or "No response"
-            logger.warning(f"{self.name} position read timeout", "DRIVE")
+        if "error" in result:
+            self.last_error = result["error"]
+            logger.warning(f"{self.name} position read failed", "DRIVE")
             return False
         
-        parsed = DataParser.parse_fc03_fc04(response, self.is_tcp)
-        
-        if "error" in parsed or len(parsed.get("registers", [])) < 2:
-            self.last_error = parsed.get("error", "Invalid response")
+        if len(result.get("registers", [])) < 2:
+            self.last_error = "Insufficient registers"
             logger.warning(f"{self.name} position parse error", "DRIVE")
             return False
         
         # Combine 2 registers into 32-bit signed
-        hi = parsed["registers"][0]
-        lo = parsed["registers"][1]
-        pos = (hi << 16) | lo
-        
-        # Convert to signed
-        if pos & 0x80000000:
-            pos = pos - (1 << 32)
+        pos = DataParser.parse_position_registers(result["registers"])
         
         self.last_data["position"] = f"{pos:,} pulse"
         logger.debug(f"Position: {pos} pulse", "DRIVE")
@@ -229,13 +187,7 @@ class DriveDevice(ModbusDevice):
     
     def step_on(self) -> bool:
         """Bật motor"""
-        if self.is_tcp:
-            frame = ModbusTCPFrame.build_fc06(self.slave_id, 0x0000, 1)
-        else:
-            frame = ModbusFrame.build_fc06(self.slave_id, 0x0000, 1)
-        
-        response = self.manager.transact(frame)
-        success = len(response) > 0
+        success = self.manager.write_register(self.slave_id, 0x0000, 1)
         
         if success:
             logger.info(f"{self.name} Step ON", "DRIVE")
@@ -246,13 +198,7 @@ class DriveDevice(ModbusDevice):
     
     def step_off(self) -> bool:
         """Tắt motor"""
-        if self.is_tcp:
-            frame = ModbusTCPFrame.build_fc06(self.slave_id, 0x0000, 0)
-        else:
-            frame = ModbusFrame.build_fc06(self.slave_id, 0x0000, 0)
-        
-        response = self.manager.transact(frame)
-        success = len(response) > 0
+        success = self.manager.write_register(self.slave_id, 0x0000, 0)
         
         if success:
             logger.info(f"{self.name} Step OFF", "DRIVE")
@@ -263,13 +209,7 @@ class DriveDevice(ModbusDevice):
     
     def reset_alarm(self) -> bool:
         """Reset alarm"""
-        if self.is_tcp:
-            frame = ModbusTCPFrame.build_fc06(self.slave_id, 0x0001, 1)
-        else:
-            frame = ModbusFrame.build_fc06(self.slave_id, 0x0001, 1)
-        
-        response = self.manager.transact(frame)
-        success = len(response) > 0
+        success = self.manager.write_register(self.slave_id, 0x0001, 1)
         
         if success:
             logger.info(f"{self.name} Reset Alarm", "DRIVE")
@@ -280,13 +220,7 @@ class DriveDevice(ModbusDevice):
     
     def move_stop(self) -> bool:
         """Dừng chuyển động"""
-        if self.is_tcp:
-            frame = ModbusTCPFrame.build_fc06(self.slave_id, 0x0002, 1)
-        else:
-            frame = ModbusFrame.build_fc06(self.slave_id, 0x0002, 1)
-        
-        response = self.manager.transact(frame)
-        success = len(response) > 0
+        success = self.manager.write_register(self.slave_id, 0x0002, 1)
         
         if success:
             logger.info(f"{self.name} Stop", "DRIVE")
@@ -295,33 +229,13 @@ class DriveDevice(ModbusDevice):
         
         return success
     
-    def pack_u32_to_regs(self, val: int) -> list:
-        """Pack 32-bit unsigned thành 2 registers"""
-        hi = (val >> 16) & 0xFFFF
-        lo = val & 0xFFFF
-        return [hi, lo]
-    
-    def pack_s32_to_regs(self, val: int) -> list:
-        """Pack 32-bit signed thành 2 registers"""
-        if val < 0:
-            val = (1 << 32) + val
-        hi = (val >> 16) & 0xFFFF
-        lo = val & 0xFFFF
-        return [hi, lo]
-    
     def jog_cw(self, speed_pps: int) -> bool:
         """JOG chiều CW"""
         try:
-            speed_regs = self.pack_u32_to_regs(speed_pps)
+            speed_regs = DataParser.pack_u32_to_regs(speed_pps)
             registers = speed_regs + [0, 1]  # direction=1 (CW)
             
-            if self.is_tcp:
-                frame = ModbusTCPFrame.build_fc16(self.slave_id, 0x30, registers)
-            else:
-                frame = ModbusFrame.build_fc16(self.slave_id, 0x30, registers)
-            
-            response = self.manager.transact(frame)
-            success = len(response) > 0
+            success = self.manager.write_registers(self.slave_id, 0x30, registers)
             
             if success:
                 logger.info(f"{self.name} JOG CW @ {speed_pps} pps", "DRIVE")
@@ -336,16 +250,10 @@ class DriveDevice(ModbusDevice):
     def jog_ccw(self, speed_pps: int) -> bool:
         """JOG chiều CCW"""
         try:
-            speed_regs = self.pack_u32_to_regs(speed_pps)
+            speed_regs = DataParser.pack_u32_to_regs(speed_pps)
             registers = speed_regs + [0, 0]  # direction=0 (CCW)
             
-            if self.is_tcp:
-                frame = ModbusTCPFrame.build_fc16(self.slave_id, 0x30, registers)
-            else:
-                frame = ModbusFrame.build_fc16(self.slave_id, 0x30, registers)
-            
-            response = self.manager.transact(frame)
-            success = len(response) > 0
+            success = self.manager.write_registers(self.slave_id, 0x30, registers)
             
             if success:
                 logger.info(f"{self.name} JOG CCW @ {speed_pps} pps", "DRIVE")
@@ -357,44 +265,14 @@ class DriveDevice(ModbusDevice):
             logger.error(f"JOG CCW error: {e}", "DRIVE")
             return False
     
-    def move_velocity(self, speed_pps: int, direction: int) -> bool:
-        """Move ở chế độ velocity"""
-        try:
-            speed_regs = self.pack_u32_to_regs(speed_pps)
-            registers = speed_regs + [0, direction & 0xFF]
-            
-            if self.is_tcp:
-                frame = ModbusTCPFrame.build_fc16(self.slave_id, 0x30, registers)
-            else:
-                frame = ModbusFrame.build_fc16(self.slave_id, 0x30, registers)
-            
-            response = self.manager.transact(frame)
-            success = len(response) > 0
-            
-            if success:
-                logger.info(f"{self.name} Move Velocity: {speed_pps} pps, Dir: {direction}", "DRIVE")
-            else:
-                logger.warning(f"{self.name} Move Velocity failed", "DRIVE")
-            
-            return success
-        except Exception as e:
-            logger.error(f"Move Velocity error: {e}", "DRIVE")
-            return False
-    
     def move_absolute(self, position: int, speed_pps: int) -> bool:
         """Move đến vị trí tuyệt đối"""
         try:
-            pos_regs = self.pack_s32_to_regs(position)
-            speed_regs = self.pack_u32_to_regs(speed_pps)
+            pos_regs = DataParser.pack_s32_to_regs(position)
+            speed_regs = DataParser.pack_u32_to_regs(speed_pps)
             registers = pos_regs + speed_regs
             
-            if self.is_tcp:
-                frame = ModbusTCPFrame.build_fc16(self.slave_id, 0x10, registers)
-            else:
-                frame = ModbusFrame.build_fc16(self.slave_id, 0x10, registers)
-            
-            response = self.manager.transact(frame)
-            success = len(response) > 0
+            success = self.manager.write_registers(self.slave_id, 0x10, registers)
             
             if success:
                 logger.info(f"{self.name} Move Absolute: pos={position}, speed={speed_pps} pps", "DRIVE")
@@ -409,17 +287,11 @@ class DriveDevice(ModbusDevice):
     def move_incremental(self, offset: int, speed_pps: int) -> bool:
         """Move tương đối (incremental)"""
         try:
-            pos_regs = self.pack_s32_to_regs(offset)
-            speed_regs = self.pack_u32_to_regs(speed_pps)
+            pos_regs = DataParser.pack_s32_to_regs(offset)
+            speed_regs = DataParser.pack_u32_to_regs(speed_pps)
             registers = pos_regs + speed_regs
             
-            if self.is_tcp:
-                frame = ModbusTCPFrame.build_fc16(self.slave_id, 0x20, registers)
-            else:
-                frame = ModbusFrame.build_fc16(self.slave_id, 0x20, registers)
-            
-            response = self.manager.transact(frame)
-            success = len(response) > 0
+            success = self.manager.write_registers(self.slave_id, 0x20, registers)
             
             if success:
                 logger.info(f"{self.name} Move Incremental: offset={offset}, speed={speed_pps} pps", "DRIVE")
@@ -430,6 +302,7 @@ class DriveDevice(ModbusDevice):
         except Exception as e:
             logger.error(f"Move Incremental error: {e}", "DRIVE")
             return False
+
 
 class DeviceManager:
     """Quản lý tất cả devices"""
